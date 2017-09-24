@@ -11,7 +11,7 @@ nvm_install_dir() {
 }
 
 nvm_latest_version() {
-  echo "v0.33.2"
+  echo "v0.33.4"
 }
 
 nvm_profile_is_bash_or_zsh() {
@@ -40,6 +40,8 @@ nvm_source() {
   NVM_SOURCE_URL="$NVM_SOURCE"
   if [ "_$NVM_METHOD" = "_script-nvm-exec" ]; then
     NVM_SOURCE_URL="https://raw.githubusercontent.com/creationix/nvm/$(nvm_latest_version)/nvm-exec"
+  elif [ "_$NVM_METHOD" = "_script-nvm-bash-completion" ]; then
+    NVM_SOURCE_URL="https://raw.githubusercontent.com/creationix/nvm/$(nvm_latest_version)/bash_completion"
   elif [ -z "$NVM_SOURCE_URL" ]; then
     if [ "_$NVM_METHOD" = "_script" ]; then
       NVM_SOURCE_URL="https://raw.githubusercontent.com/creationix/nvm/$(nvm_latest_version)/nvm.sh"
@@ -84,7 +86,7 @@ install_nvm_from_git() {
   if [ -d "$INSTALL_DIR/.git" ]; then
     echo "=> nvm is already installed in $INSTALL_DIR, trying to update using git"
     command printf "\r=> "
-    command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" fetch 2> /dev/null || {
+    command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" fetch origin tag "$(nvm_latest_version)" --depth=1 2> /dev/null || {
       echo >&2 "Failed to update nvm, run 'git fetch' in $INSTALL_DIR yourself."
       exit 1
     }
@@ -103,12 +105,12 @@ install_nvm_from_git() {
         echo >&2 'Failed to add remote "origin" (or set the URL). Please report this!'
         exit 2
       }
-      command git --git-dir="${INSTALL_DIR}/.git" fetch origin --tags || {
+      command git --git-dir="${INSTALL_DIR}/.git" fetch origin tag "$(nvm_latest_version)" --depth=1 || {
         echo >&2 'Failed to fetch origin with tags. Please report this!'
         exit 2
       }
     else
-      command git clone "$(nvm_source)" "${INSTALL_DIR}" || {
+      command git clone "$(nvm_source)" -b "$(nvm_latest_version)" --depth=1 "${INSTALL_DIR}" || {
         echo >&2 'Failed to clone nvm repo. Please report this!'
         exit 2
       }
@@ -125,7 +127,10 @@ install_nvm_from_git() {
   fi
 
   echo "=> Compressing and cleaning up git repository"
-  if ! command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" gc --aggressive --prune=now ; then
+  if ! command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" reflog expire --expire=now --all; then
+    echo >&2 "Your version of git is out of date. Please update it!"
+  fi
+  if ! command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" gc --auto --aggressive --prune=now ; then
     echo >&2 "Your version of git is out of date. Please update it!"
   fi
   return
@@ -158,9 +163,11 @@ install_nvm_as_script() {
   local INSTALL_DIR
   INSTALL_DIR="$(nvm_install_dir)"
   local NVM_SOURCE_LOCAL
-  NVM_SOURCE_LOCAL=$(nvm_source script)
+  NVM_SOURCE_LOCAL="$(nvm_source script)"
   local NVM_EXEC_SOURCE
-  NVM_EXEC_SOURCE=$(nvm_source script-nvm-exec)
+  NVM_EXEC_SOURCE="$(nvm_source script-nvm-exec)"
+  local NVM_BASH_COMPLETION_SOURCE
+  NVM_BASH_COMPLETION_SOURCE="$(nvm_source script-nvm-bash-completion)"
 
   # Downloading to $INSTALL_DIR
   mkdir -p "$INSTALL_DIR"
@@ -175,6 +182,10 @@ install_nvm_as_script() {
   } &
   nvm_download -s "$NVM_EXEC_SOURCE" -o "$INSTALL_DIR/nvm-exec" || {
     echo >&2 "Failed to download '$NVM_EXEC_SOURCE'"
+    return 2
+  } &
+  nvm_download -s "$NVM_BASH_COMPLETION_SOURCE" -o "$INSTALL_DIR/bash_completion" || {
+    echo >&2 "Failed to download '$NVM_BASH_COMPLETION_SOURCE'"
     return 2
   } &
   for job in $(jobs -p | sort)

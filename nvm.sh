@@ -53,13 +53,13 @@ nvm_command_info() {
   local COMMAND
   local INFO
   COMMAND="${1}"
-  if type "${COMMAND}" | command grep -q hashed; then
+  if type "${COMMAND}" | nvm_grep -q hashed; then
     INFO="$(type "${COMMAND}" | command sed -E 's/\(|)//g' | command awk '{print $4}')"
-  elif type "${COMMAND}" | command grep -q aliased; then
+  elif type "${COMMAND}" | nvm_grep -q aliased; then
     INFO="$(which "${COMMAND}") ($(type "${COMMAND}" | command awk '{ $1=$2=$3=$4="" ;print }' | command sed -e 's/^\ *//g' -Ee "s/\`|'//g" ))"
-  elif type "${COMMAND}" | command grep -q "^${COMMAND} is an alias for"; then
+  elif type "${COMMAND}" | nvm_grep -q "^${COMMAND} is an alias for"; then
     INFO="$(which "${COMMAND}") ($(type "${COMMAND}" | command awk '{ $1=$2=$3=$4=$5="" ;print }' | command sed 's/^\ *//g'))"
-  elif type "${COMMAND}" | command grep -q "^${COMMAND} is \/"; then
+  elif type "${COMMAND}" | nvm_grep -q "^${COMMAND} is \/"; then
     INFO="$(type "${COMMAND}" | command awk '{print $3}')"
   else
     INFO="$(type "${COMMAND}")"
@@ -90,7 +90,7 @@ nvm_get_latest() {
     if nvm_curl_use_compression; then
       CURL_COMPRESSED_FLAG="--compressed"
     fi
-    NVM_LATEST_URL="$(curl "${CURL_COMPRESSED_FLAG:-}" -q -w "%{url_effective}\n" -L -s -S http://latest.nvm.sh -o /dev/null)"
+    NVM_LATEST_URL="$(curl ${CURL_COMPRESSED_FLAG:-} -q -w "%{url_effective}\n" -L -s -S http://latest.nvm.sh -o /dev/null)"
   elif nvm_has "wget"; then
     NVM_LATEST_URL="$(wget http://latest.nvm.sh --server-response -O /dev/null 2>&1 | command awk '/^  Location: /{DEST=$2} END{ print DEST }')"
   else
@@ -110,7 +110,7 @@ nvm_download() {
     if nvm_curl_use_compression; then
       CURL_COMPRESSED_FLAG="--compressed"
     fi
-    curl --fail "${CURL_COMPRESSED_FLAG:-}" -q "$@"
+    curl --fail ${CURL_COMPRESSED_FLAG:-} -q "$@"
   elif nvm_has "wget"; then
     # Emulate curl with wget
     ARGS=$(nvm_echo "$@" | command sed -e 's/--progress-bar /--progress=bar /' \
@@ -199,15 +199,23 @@ nvm_install_latest_npm() {
 
   if [ $NVM_IS_0_9 -eq 1 ] || [ $NVM_IS_0_6 -eq 1 ]; then
     nvm_echo '* node v0.6 and v0.9 are unable to upgrade further'
-  elif nvm_version_greater 1.0.0 "${NODE_VERSION}"; then
-    nvm_echo '* `npm` v4.5.x is the last version that works on `node` versions below v1.0.0'
+  elif nvm_version_greater 1.1.0 "${NODE_VERSION}"; then
+    nvm_echo '* `npm` v4.5.x is the last version that works on `node` versions < v1.1.0'
     $NVM_NPM_CMD install -g npm@4.5
   elif nvm_version_greater 4.0.0 "${NODE_VERSION}"; then
     nvm_echo '* `npm` v5 and higher do not work on `node` versions below v4.0.0'
     $NVM_NPM_CMD install -g npm@4
   elif [ $NVM_IS_0_9 -eq 0 ] && [ $NVM_IS_0_6 -eq 0 ]; then
-    nvm_echo '* Installing latest `npm`; if this does not work on your node version, please report a bug!'
-    $NVM_NPM_CMD install -g npm
+    if nvm_version_greater 4.5.0 "${NODE_VERSION}" || (\
+      nvm_version_greater_than_or_equal_to "${NODE_VERSION}" 5.0.0 \
+      && nvm_version_greater 5.10.0 "${NODE_VERSION}"\
+    ); then
+      nvm_echo '* `npm` `v5.3.x` is the last version that works on `node` 4.x versions below v4.4, or 5.x versions below v5.10, due to `Buffer.alloc`'
+      $NVM_NPM_CMD install -g npm@5.3
+    else
+      nvm_echo '* Installing latest `npm`; if this does not work on your node version, please report a bug!'
+      $NVM_NPM_CMD install -g npm
+    fi
   fi
   nvm_echo "* npm upgraded to: v$(npm --version 2>/dev/null)"
 }
@@ -593,11 +601,21 @@ nvm_strip_path() {
     -e "s#${NVM_DIR}/versions/[^/]*/[^/]*${2-}[^:]*##g"
 }
 
-nvm_prepend_path() {
+nvm_change_path() {
+  # if there’s no initial path, just return the supplementary path
   if [ -z "${1-}" ]; then
-    nvm_echo "${2-}"
+    nvm_echo "${3-}${2-}"
+  # if the initial path doesn’t contain an nvm path, prepend the supplementary
+  # path
+  elif ! echo "${1-}" | nvm_grep -q "${NVM_DIR}/[^/]*${2-}" && \
+       ! echo "${1-}" | nvm_grep -q "${NVM_DIR}/versions/[^/]*/[^/]*${2-}"; then
+    nvm_echo "${3-}${2-}:${1-}"
+  # use sed to replace the existing nvm path with the supplementary path. This
+  # preserves the order of the path.
   else
-    nvm_echo "${2-}:${1-}"
+    nvm_echo "${1-}" | command sed \
+      -e "s#${NVM_DIR}/[^/]*${2-}[^:]*#${3-}${2-}#g" \
+      -e "s#${NVM_DIR}/versions/[^/]*/[^/]*${2-}[^:]*#${3-}${2-}#g"
   fi
 }
 
@@ -2357,6 +2375,9 @@ nvm() {
         setopt shwordsplit
       fi
       nvm_err "nvm --version: v$(nvm --version)"
+      if [ -n "${TERM_PROGRAM-}" ]; then
+        nvm_err "\$TERM_PROGRAM: $TERM_PROGRAM"
+      fi
       nvm_err "\$SHELL: $SHELL"
       nvm_err "\$HOME: $HOME"
       nvm_err "\$NVM_DIR: '$(nvm_sanitize_path "$NVM_DIR")'"
@@ -2381,11 +2402,15 @@ nvm() {
       else
         nvm_err "wget: not found"
       fi
-      if nvm_has "git"; then
-        nvm_err "git: $(nvm_command_info git), $(command git --version)"
-      else
-        nvm_err "git: not found"
-      fi
+
+      for tool in git grep awk sed cut basename rm mkdir xargs; do
+        if nvm_has "${tool}"; then
+          nvm_err "${tool}: $(nvm_command_info ${tool}), $(command ${tool} --version | command head -n 1)"
+        else
+          nvm_err "${tool}: not found"
+        fi
+      done
+
       local NVM_DEBUG_OUTPUT
       for NVM_DEBUG_COMMAND in 'nvm current' 'which node' 'which iojs' 'which npm' 'npm config get prefix' 'npm root -g'
       do
@@ -2532,7 +2557,7 @@ nvm() {
         shift
       done
 
-      if [ -z "$SKIP_DEFAULT_PACKAGES" ] && [ -f "${NVM_DIR}/default-packages" ]; then
+      if [ -z "${SKIP_DEFAULT_PACKAGES-}" ] && [ -f "${NVM_DIR}/default-packages" ]; then
         DEFAULT_PACKAGES=""
 
         # Read lines from $NVM_DIR/default-packages
@@ -2804,9 +2829,9 @@ nvm() {
 
       if [ -n "${NVM_LTS-}" ]; then
         VERSION="$(nvm_match_version "lts/${NVM_LTS:-*}")"
-      elif [ -z "$PROVIDED_VERSION" ]; then
+      elif [ -z "${PROVIDED_VERSION-}" ]; then
         nvm_rc_version
-        if [ -n "$NVM_RC_VERSION" ]; then
+        if [ -n "${NVM_RC_VERSION-}" ]; then
           PROVIDED_VERSION="$NVM_RC_VERSION"
           VERSION="$(nvm_version "$PROVIDED_VERSION")"
         fi
@@ -2855,19 +2880,15 @@ nvm() {
       local NVM_VERSION_DIR
       NVM_VERSION_DIR="$(nvm_version_path "$VERSION")"
 
-      # Strip other version from PATH
-      PATH="$(nvm_strip_path "$PATH" "/bin")"
-      # Prepend current version
-      PATH="$(nvm_prepend_path "$PATH" "$NVM_VERSION_DIR/bin")"
+      # Change current version
+      PATH="$(nvm_change_path "$PATH" "/bin" "$NVM_VERSION_DIR")"
       if nvm_has manpath; then
         if [ -z "${MANPATH-}" ]; then
           local MANPATH
           MANPATH=$(manpath)
         fi
-        # Strip other version from MANPATH
-        MANPATH="$(nvm_strip_path "$MANPATH" "/share/man")"
-        # Prepend current version
-        MANPATH="$(nvm_prepend_path "$MANPATH" "$NVM_VERSION_DIR/share/man")"
+        # Change current version
+        MANPATH="$(nvm_change_path "$MANPATH" "/share/man" "$NVM_VERSION_DIR")"
         export MANPATH
       fi
       export PATH
@@ -3357,7 +3378,7 @@ nvm() {
       NVM_VERSION_ONLY=true NVM_LTS="${NVM_LTS-}" nvm_remote_version "${PATTERN:-node}"
     ;;
     "--version" )
-      nvm_echo '0.33.2'
+      nvm_echo '0.33.4'
     ;;
     "unload" )
       nvm deactivate >/dev/null 2>&1
@@ -3376,7 +3397,7 @@ nvm() {
         nvm_ensure_default_set nvm_get_arch nvm_get_os \
         nvm_print_implicit_alias nvm_validate_implicit_alias \
         nvm_resolve_alias nvm_ls_current nvm_alias \
-        nvm_binary_available nvm_prepend_path nvm_strip_path \
+        nvm_binary_available nvm_change_path nvm_strip_path \
         nvm_num_version_groups nvm_format_version nvm_ensure_version_prefix \
         nvm_normalize_version nvm_is_valid_version \
         nvm_ensure_version_installed nvm_cache_dir \
@@ -3397,7 +3418,7 @@ nvm() {
         node_version_has_solaris_binary iojs_version_has_solaris_binary \
         nvm_curl_libz_support nvm_command_info \
         > /dev/null 2>&1
-      unset RC_VERSION NVM_NODEJS_ORG_MIRROR NVM_IOJS_ORG_MIRROR NVM_DIR \
+      unset NVM_RC_VERSION NVM_NODEJS_ORG_MIRROR NVM_IOJS_ORG_MIRROR NVM_DIR \
         NVM_CD_FLAGS NVM_BIN NVM_MAKE_JOBS \
         > /dev/null 2>&1
     ;;
